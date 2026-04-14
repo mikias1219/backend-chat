@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: selam-collab-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: selam_collab
+    ports:
+      - "5432:5432"
+    volumes:
+      - selam_collab_pgdata:/var/lib/postgresql/data
+
+volumes:
+  selam_collab_pgdata:
+

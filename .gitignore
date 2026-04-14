@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+
+# Local dev env
+.env.local
+
+# Local SQLite database
+dev.db
+dev.db-journal
+
+# Local ngrok download
+.tools/
+

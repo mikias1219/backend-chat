@@ -1,0 +1,128 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String?  @unique
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships RoomMember[]
+  messages    Message[]
+  receipts    MessageReceipt[]
+  uploads     Attachment[]     @relation("UserUploads")
+}
+
+enum RoomType {
+  DIRECT
+  GROUP
+}
+
+model Room {
+  id        String   @id @default(uuid())
+  name      String
+  type      RoomType @default(GROUP)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members  RoomMember[]
+  messages Message[]
+  uploads  Attachment[]
+
+  // For DIRECT rooms only, we store a stable unique key like "userA:userB"
+  directKey String?  @unique
+}
+
+model RoomMember {
+  roomId   String
+  userId   String
+  role     RoomRole  @default(MEMBER)
+  joinedAt DateTime  @default(now())
+  lastReadAt DateTime?
+  lastReadMessageId String?
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([roomId, userId])
+  @@index([userId])
+  @@index([roomId, lastReadAt])
+}
+
+enum RoomRole {
+  OWNER
+  MEMBER
+}
+
+model Message {
+  id        String   @id @default(uuid())
+  roomId    String
+  userId    String
+  body      String
+  replyToId String?
+  createdAt DateTime @default(now())
+
+  room    Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replyTo Message? @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies Message[] @relation("MessageReplies")
+
+  receipts MessageReceipt[]
+  attachments Attachment[]
+
+  @@index([roomId, createdAt])
+  @@index([userId, createdAt])
+}
+
+enum AttachmentKind {
+  IMAGE
+  FILE
+}
+
+model Attachment {
+  id         String         @id @default(uuid())
+  kind       AttachmentKind
+  fileName   String
+  mimeType   String
+  sizeBytes  Int
+  url        String
+  createdAt  DateTime       @default(now())
+
+  roomId     String
+  messageId  String?
+  uploaderId String
+
+  room     Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  message  Message? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  uploader User     @relation("UserUploads", fields: [uploaderId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, createdAt])
+  @@index([messageId])
+  @@index([uploaderId, createdAt])
+}
+
+enum ReceiptStatus {
+  DELIVERED
+  READ
+}
+
+model MessageReceipt {
+  messageId String
+  userId    String
+  status    ReceiptStatus
+  at        DateTime      @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([messageId, userId, status])
+  @@index([userId, at])
+}
+
