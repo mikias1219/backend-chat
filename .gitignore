@@ -4,10 +4,14 @@ coverage/
 
 # Local dev env
 .env.local
+.env
 
 # Local SQLite database
 dev.db
 dev.db-journal
+
+# Uploads
+uploads/
 
 # Local ngrok download
 .tools/
