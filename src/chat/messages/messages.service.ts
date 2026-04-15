@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { AttachmentKind, ReceiptStatus } from '../../generated/prisma';
 import { PrismaService } from '../../database/prisma.service';
 
@@ -11,6 +11,13 @@ export type AttachmentOut = {
   url: string;
 };
 
+export type MessageReplyPreview = {
+  id: string;
+  userId: string;
+  userName: string;
+  body: string;
+};
+
 export type MessageOut = {
   id: string;
   roomId: string;
@@ -18,6 +25,7 @@ export type MessageOut = {
   userName: string;
   body: string;
   replyToId?: string | null;
+  replyTo?: MessageReplyPreview | null;
   createdAt: string;
   deliveredTo: string[];
   readBy: string[];
@@ -36,6 +44,17 @@ export class MessagesService {
     attachmentIds?: string[];
   }): Promise<MessageOut> {
     const attachmentIds = (params.attachmentIds ?? []).filter(Boolean);
+
+    if (params.replyToId) {
+      const parent = await this.prisma.message.findUnique({
+        where: { id: params.replyToId },
+      });
+      if (!parent || parent.roomId !== params.roomId) {
+        throw new BadRequestException(
+          'replyToId must reference a message in the same room',
+        );
+      }
+    }
 
     const created = await this.prisma.$transaction(async (tx) => {
       const msg = await tx.message.create({
@@ -68,26 +87,95 @@ export class MessagesService {
 
       return tx.message.findUniqueOrThrow({
         where: { id: msg.id },
-        include: { user: true, receipts: true, attachments: true },
+        include: {
+          user: true,
+          receipts: true,
+          attachments: true,
+          replyTo: { include: { user: true } },
+        },
       });
     });
 
     return this.toOut(created);
   }
 
-  async getRecent(params: { roomId: string; limit?: number }): Promise<MessageOut[]> {
+  /**
+   * Paginated history: default is latest page. Use `beforeMessageId` to load older messages (infinite scroll up).
+   */
+  async listMessages(params: {
+    roomId: string;
+    limit?: number;
+    beforeMessageId?: string;
+    afterMessageId?: string;
+  }): Promise<MessageOut[]> {
     const limit = Math.max(1, Math.min(200, params.limit ?? 50));
+
+    let cursorDate: Date | undefined;
+    if (params.beforeMessageId) {
+      const anchor = await this.prisma.message.findUnique({
+        where: { id: params.beforeMessageId },
+      });
+      if (!anchor || anchor.roomId !== params.roomId) {
+        throw new BadRequestException('beforeMessageId is not in this room');
+      }
+      cursorDate = anchor.createdAt;
+    }
+    if (params.afterMessageId) {
+      const anchor = await this.prisma.message.findUnique({
+        where: { id: params.afterMessageId },
+      });
+      if (!anchor || anchor.roomId !== params.roomId) {
+        throw new BadRequestException('afterMessageId is not in this room');
+      }
+      cursorDate = anchor.createdAt;
+    }
+
+    const where: {
+      roomId: string;
+      createdAt?: { lt?: Date; gt?: Date };
+    } = { roomId: params.roomId };
+
+    if (cursorDate) {
+      if (params.beforeMessageId) where.createdAt = { lt: cursorDate };
+      if (params.afterMessageId) where.createdAt = { gt: cursorDate };
+    }
+
+    const orderBy = params.afterMessageId
+      ? ({ createdAt: 'asc' } as const)
+      : ({ createdAt: 'desc' } as const);
+
     const messages = await this.prisma.message.findMany({
-      where: { roomId: params.roomId },
-      orderBy: { createdAt: 'desc' },
+      where,
+      orderBy,
       take: limit,
-      include: { user: true, receipts: true, attachments: true },
+      include: {
+        user: true,
+        receipts: true,
+        attachments: true,
+        replyTo: { include: { user: true } },
+      },
     });
-    return messages.reverse().map((m) => this.toOut(m));
+
+    const ordered = params.afterMessageId ? messages : messages.reverse();
+    return ordered.map((m) => this.toOut(m));
   }
 
-  async markDelivered(params: { roomId: string; messageId: string; userId: string }) {
-    const msg = await this.prisma.message.findUnique({ where: { id: params.messageId } });
+  /** @deprecated Prefer listMessages */
+  async getRecent(params: {
+    roomId: string;
+    limit?: number;
+  }): Promise<MessageOut[]> {
+    return this.listMessages({ roomId: params.roomId, limit: params.limit });
+  }
+
+  async markDelivered(params: {
+    roomId: string;
+    messageId: string;
+    userId: string;
+  }) {
+    const msg = await this.prisma.message.findUnique({
+      where: { id: params.messageId },
+    });
     if (!msg || msg.roomId !== params.roomId) return;
     await this.prisma.messageReceipt.upsert({
       where: {
@@ -98,12 +186,22 @@ export class MessagesService {
         },
       },
       update: {},
-      create: { messageId: params.messageId, userId: params.userId, status: ReceiptStatus.DELIVERED },
+      create: {
+        messageId: params.messageId,
+        userId: params.userId,
+        status: ReceiptStatus.DELIVERED,
+      },
     });
   }
 
-  async markRead(params: { roomId: string; messageId: string; userId: string }) {
-    const msg = await this.prisma.message.findUnique({ where: { id: params.messageId } });
+  async markRead(params: {
+    roomId: string;
+    messageId: string;
+    userId: string;
+  }) {
+    const msg = await this.prisma.message.findUnique({
+      where: { id: params.messageId },
+    });
     if (!msg || msg.roomId !== params.roomId) return;
 
     await this.prisma.messageReceipt.upsert({
@@ -115,7 +213,11 @@ export class MessagesService {
         },
       },
       update: {},
-      create: { messageId: params.messageId, userId: params.userId, status: ReceiptStatus.DELIVERED },
+      create: {
+        messageId: params.messageId,
+        userId: params.userId,
+        status: ReceiptStatus.DELIVERED,
+      },
     });
 
     await this.prisma.messageReceipt.upsert({
@@ -127,7 +229,11 @@ export class MessagesService {
         },
       },
       update: {},
-      create: { messageId: params.messageId, userId: params.userId, status: ReceiptStatus.READ },
+      create: {
+        messageId: params.messageId,
+        userId: params.userId,
+        status: ReceiptStatus.READ,
+      },
     });
   }
 
@@ -148,11 +254,23 @@ export class MessagesService {
       sizeBytes: number;
       url: string;
     }[];
+    replyTo?: {
+      id: string;
+      userId: string;
+      body: string;
+      user: { name: string };
+    } | null;
   }): MessageOut {
     const deliveredTo = message.receipts
-      .filter((r) => r.status === ReceiptStatus.DELIVERED || r.status === ReceiptStatus.READ)
+      .filter(
+        (r) =>
+          r.status === ReceiptStatus.DELIVERED ||
+          r.status === ReceiptStatus.READ,
+      )
       .map((r) => r.userId);
-    const readBy = message.receipts.filter((r) => r.status === ReceiptStatus.READ).map((r) => r.userId);
+    const readBy = message.receipts
+      .filter((r) => r.status === ReceiptStatus.READ)
+      .map((r) => r.userId);
 
     return {
       id: message.id,
@@ -161,6 +279,14 @@ export class MessagesService {
       userName: message.user.name,
       body: message.body,
       replyToId: message.replyToId,
+      replyTo: message.replyTo
+        ? {
+            id: message.replyTo.id,
+            userId: message.replyTo.userId,
+            userName: message.replyTo.user.name,
+            body: message.replyTo.body,
+          }
+        : null,
       createdAt: message.createdAt.toISOString(),
       deliveredTo: Array.from(new Set(deliveredTo)),
       readBy: Array.from(new Set(readBy)),
@@ -175,4 +301,3 @@ export class MessagesService {
     };
   }
 }
-

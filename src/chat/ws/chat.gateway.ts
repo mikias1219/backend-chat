@@ -1,15 +1,17 @@
+import { HttpException } from '@nestjs/common';
 import {
   ConnectedSocket,
   MessageBody,
+  OnGatewayInit,
   SubscribeMessage,
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { RoomsService } from '../rooms/rooms.service';
-import { MessagesService } from '../messages/messages.service';
+import { ChatCoordinatorService } from '../chat-coordinator.service';
 import { JoinRoomDto } from '../dto/join-room.dto';
 import { SendMessageDto } from '../dto/send-message.dto';
+import { ChatEventsService } from './chat-events.service';
 
 type ClientMeta = {
   userId?: string;
@@ -32,24 +34,46 @@ type AckPayload = {
     origin: process.env.FRONTEND_URL?.split(',') ?? true,
     credentials: true,
   },
+  // Production defaults: allow polling fallback but keep sane timeouts.
+  pingInterval: Number(process.env.SOCKET_PING_INTERVAL_MS ?? 25000),
+  pingTimeout: Number(process.env.SOCKET_PING_TIMEOUT_MS ?? 20000),
+  maxHttpBufferSize: Number(
+    process.env.SOCKET_MAX_HTTP_BUFFER_BYTES ?? 1_000_000,
+  ), // 1MB
 })
-export class ChatGateway {
+export class ChatGateway implements OnGatewayInit {
   @WebSocketServer()
   server!: Server;
 
   constructor(
-    private readonly rooms: RoomsService,
-    private readonly messages: MessagesService,
+    private readonly coordinator: ChatCoordinatorService,
+    private readonly events: ChatEventsService,
   ) {}
 
-  private readonly userIdsByRoom = new Map<string, Set<string>>();
-  private readonly typingByRoom = new Map<string, Set<string>>();
+  afterInit() {
+    this.events.attachServer(this.server);
+  }
+
+  private socketRequireAuth(): boolean {
+    // In production you almost always want this true.
+    return (
+      (process.env.SOCKET_REQUIRE_AUTH ?? 'true').toLowerCase() !== 'false'
+    );
+  }
+
+  private socketAllowAnon(): boolean {
+    // Useful for local demos only. If REQUIRE_AUTH is true, this is ignored.
+    return (process.env.SOCKET_ALLOW_ANON ?? 'false').toLowerCase() === 'true';
+  }
 
   private decodeJwt(token: string): Record<string, unknown> | null {
     const parts = token.split('.');
     if (parts.length < 2) return null;
     const payload = parts[1];
-    const padded = payload.padEnd(payload.length + ((4 - (payload.length % 4)) % 4), '=');
+    const padded = payload.padEnd(
+      payload.length + ((4 - (payload.length % 4)) % 4),
+      '=',
+    );
     const b64 = padded.replace(/-/g, '+').replace(/_/g, '/');
     try {
       const json = Buffer.from(b64, 'base64').toString('utf8');
@@ -79,138 +103,189 @@ export class ChatGateway {
         (claims?.sub as string | undefined) ??
         (claims?.userId as string | undefined) ??
         (claims?.id as string | undefined);
-      const userName = (claims?.name as string | undefined) ?? (claims?.userName as string | undefined);
+      const userName =
+        (claims?.name as string | undefined) ??
+        (claims?.userName as string | undefined);
       const email = (claims?.email as string | undefined) ?? undefined;
 
       this.setMeta(socket, {
         ...meta,
-        userId: userId ?? `token:${token.slice(0, 12)}`,
+        userId: userId,
         userName,
         email,
       });
       return;
     }
 
+    if (this.socketRequireAuth() && !this.socketAllowAnon()) {
+      throw new HttpException('Unauthorized (missing token)', 401);
+    }
+
     this.setMeta(socket, {
       ...meta,
-      userId: `anon:${crypto.randomUUID().slice(0, 8)}`,
+      userId: meta.userId ?? `anon:${crypto.randomUUID().slice(0, 8)}`,
       userName: meta.userName ?? 'Anonymous',
     });
   }
 
   @SubscribeMessage('chat:join')
-  async onJoin(@MessageBody() body: JoinRoomDto, @ConnectedSocket() socket: Socket) {
+  async onJoin(
+    @MessageBody() body: JoinRoomDto,
+    @ConnectedSocket() socket: Socket,
+  ) {
     if (!body?.roomId) return { ok: false, error: 'roomId is required' };
 
-    this.ensureIdentity(socket);
+    try {
+      this.ensureIdentity(socket);
+    } catch (e) {
+      if (e instanceof HttpException) return { ok: false, error: e.message };
+      return { ok: false, error: 'unauthorized' };
+    }
     const meta = this.getMeta(socket);
-    const user = await this.rooms.ensureUser({
-      id: meta.userId,
-      name: meta.userName,
-      email: meta.email ?? null,
-    });
-    await this.rooms.joinRoom({ roomId: body.roomId, userId: user.id });
-
-    await socket.join(body.roomId);
-
-    const set = this.userIdsByRoom.get(body.roomId) ?? new Set<string>();
-    set.add(user.id);
-    this.userIdsByRoom.set(body.roomId, set);
-    this.server.to(body.roomId).emit('presence:update', { userIds: Array.from(set) });
-
-    socket.emit('chat:recent', {
+    if (!meta.userId) return { ok: false, error: 'Unauthorized' };
+    await this.coordinator.joinSocketRoom({
+      socket,
       roomId: body.roomId,
-      messages: await this.messages.getRecent({ roomId: body.roomId }),
+      identity: {
+        userId: meta.userId!,
+        name: meta.userName,
+        email: meta.email ?? null,
+      },
     });
 
     return { ok: true };
   }
 
   @SubscribeMessage('chat:leave')
-  async onLeave(@MessageBody() body: Pick<JoinRoomDto, 'roomId'>, @ConnectedSocket() socket: Socket) {
+  async onLeave(
+    @MessageBody() body: Pick<JoinRoomDto, 'roomId'>,
+    @ConnectedSocket() socket: Socket,
+  ) {
     if (!body?.roomId) return { ok: false, error: 'roomId is required' };
-    await socket.leave(body.roomId);
-
     const { userId } = this.getMeta(socket);
-    const set = this.userIdsByRoom.get(body.roomId);
-    if (userId && set) {
-      set.delete(userId);
-      if (set.size === 0) this.userIdsByRoom.delete(body.roomId);
-      this.server.to(body.roomId).emit('presence:update', { userIds: Array.from(set) });
-    }
+    await this.coordinator.leaveSocketRoom({
+      socket,
+      roomId: body.roomId,
+      userId,
+    });
     return { ok: true };
   }
 
   @SubscribeMessage('chat:send')
-  async onMessage(@MessageBody() body: SendMessageDto, @ConnectedSocket() socket: Socket) {
-    if (!body?.roomId || (!body?.body && !(body.attachmentIds?.length ?? 0))) {
-      return { ok: false, error: 'roomId and body (or attachments) are required' };
+  async onMessage(
+    @MessageBody() body: SendMessageDto,
+    @ConnectedSocket() socket: Socket,
+  ) {
+    if (!body?.roomId) {
+      return { ok: false, error: 'roomId is required' };
     }
 
-    this.ensureIdentity(socket);
+    try {
+      this.ensureIdentity(socket);
+    } catch (e) {
+      if (e instanceof HttpException) return { ok: false, error: e.message };
+      return { ok: false, error: 'unauthorized' };
+    }
     const meta = this.getMeta(socket);
-    const user = await this.rooms.ensureUser({
-      id: meta.userId,
-      name: meta.userName,
-      email: meta.email ?? null,
-    });
-    await this.rooms.joinRoom({ roomId: body.roomId, userId: user.id });
+    if (!meta.userId) return { ok: false, error: 'Unauthorized' };
 
-    const saved = await this.messages.createMessage({
-      roomId: body.roomId,
-      userId: user.id,
-      body: body.body ?? '',
-      replyToId: body.replyToId,
-      attachmentIds: body.attachmentIds,
-    });
-
-    this.server.to(body.roomId).emit('chat:message', saved);
-    return { ok: true, message: saved };
+    try {
+      const message = await this.coordinator.sendMessage({
+        roomId: body.roomId,
+        identity: {
+          userId: meta.userId!,
+          name: meta.userName,
+          email: meta.email ?? null,
+        },
+        body: body.body,
+        replyToId: body.replyToId,
+        attachmentIds: body.attachmentIds,
+      });
+      return { ok: true, message, clientId: body.clientId };
+    } catch (e) {
+      if (e instanceof HttpException) {
+        return { ok: false, error: e.message };
+      }
+      const err = e as { message?: string };
+      return { ok: false, error: err?.message ?? 'send failed' };
+    }
   }
 
   @SubscribeMessage('chat:typing')
-  async onTyping(@MessageBody() body: TypingPayload, @ConnectedSocket() socket: Socket) {
+  async onTyping(
+    @MessageBody() body: TypingPayload,
+    @ConnectedSocket() socket: Socket,
+  ) {
     if (!body?.roomId) return { ok: false, error: 'roomId is required' };
-    this.ensureIdentity(socket);
+    try {
+      this.ensureIdentity(socket);
+    } catch (e) {
+      if (e instanceof HttpException) return { ok: false, error: e.message };
+      return { ok: false, error: 'unauthorized' };
+    }
     const meta = this.getMeta(socket);
     const userId = meta.userId;
     if (!userId) return { ok: false, error: 'userId not available' };
 
-    const set = this.typingByRoom.get(body.roomId) ?? new Set<string>();
-    if (body.isTyping) set.add(userId);
-    else set.delete(userId);
-    if (set.size === 0) this.typingByRoom.delete(body.roomId);
-    else this.typingByRoom.set(body.roomId, set);
-
-    socket.to(body.roomId).emit('chat:typing', { roomId: body.roomId, userIds: Array.from(set) });
-    return { ok: true };
+    try {
+      await this.coordinator.broadcastTypingFromSocket({
+        socket,
+        roomId: body.roomId,
+        userId,
+        isTyping: body.isTyping,
+      });
+      return { ok: true };
+    } catch (e) {
+      if (e instanceof HttpException) return { ok: false, error: e.message };
+      return { ok: false, error: 'typing failed' };
+    }
   }
 
   @SubscribeMessage('chat:ack:delivered')
-  async onDelivered(@MessageBody() body: AckPayload, @ConnectedSocket() socket: Socket) {
-    if (!body?.roomId || !body?.messageId) return { ok: false, error: 'roomId and messageId are required' };
-    this.ensureIdentity(socket);
+  async onDelivered(
+    @MessageBody() body: AckPayload,
+    @ConnectedSocket() socket: Socket,
+  ) {
+    if (!body?.roomId || !body?.messageId)
+      return { ok: false, error: 'roomId and messageId are required' };
+    try {
+      this.ensureIdentity(socket);
+    } catch (e) {
+      if (e instanceof HttpException) return { ok: false, error: e.message };
+      return { ok: false, error: 'unauthorized' };
+    }
     const { userId } = this.getMeta(socket);
     if (!userId) return { ok: false, error: 'userId not available' };
 
-    await this.messages.markDelivered({ roomId: body.roomId, messageId: body.messageId, userId });
-    this.server.to(body.roomId).emit('chat:message:delivered', { roomId: body.roomId, messageId: body.messageId, userId });
+    await this.coordinator.markDeliveredAndEmit({
+      roomId: body.roomId,
+      messageId: body.messageId,
+      userId,
+    });
     return { ok: true };
   }
 
   @SubscribeMessage('chat:ack:read')
-  async onRead(@MessageBody() body: AckPayload, @ConnectedSocket() socket: Socket) {
-    if (!body?.roomId || !body?.messageId) return { ok: false, error: 'roomId and messageId are required' };
-    this.ensureIdentity(socket);
+  async onRead(
+    @MessageBody() body: AckPayload,
+    @ConnectedSocket() socket: Socket,
+  ) {
+    if (!body?.roomId || !body?.messageId)
+      return { ok: false, error: 'roomId and messageId are required' };
+    try {
+      this.ensureIdentity(socket);
+    } catch (e) {
+      if (e instanceof HttpException) return { ok: false, error: e.message };
+      return { ok: false, error: 'unauthorized' };
+    }
     const { userId } = this.getMeta(socket);
     if (!userId) return { ok: false, error: 'userId not available' };
 
-    await this.messages.markRead({ roomId: body.roomId, messageId: body.messageId, userId });
-    // Also update unread tracking (best-effort)
-    await this.rooms.markRoomRead({ roomId: body.roomId, userId, upToMessageId: body.messageId }).catch(() => undefined);
-
-    this.server.to(body.roomId).emit('chat:message:read', { roomId: body.roomId, messageId: body.messageId, userId });
+    await this.coordinator.markReadAndEmit({
+      roomId: body.roomId,
+      messageId: body.messageId,
+      userId,
+    });
     return { ok: true };
   }
 }
-

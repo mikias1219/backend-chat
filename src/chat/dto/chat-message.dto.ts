@@ -1,5 +1,12 @@
 import { ApiProperty } from '@nestjs/swagger';
 
+export class MessageReplyPreviewDto {
+  @ApiProperty() id!: string;
+  @ApiProperty() userId!: string;
+  @ApiProperty() userName!: string;
+  @ApiProperty() body!: string;
+}
+
 export class AttachmentDto {
   @ApiProperty() id!: string;
   @ApiProperty({ enum: ['IMAGE', 'FILE'] }) kind!: 'IMAGE' | 'FILE';
@@ -16,9 +23,15 @@ export class ChatMessageDto {
   @ApiProperty() userName!: string;
   @ApiProperty() body!: string;
   @ApiProperty({ required: false, nullable: true }) replyToId?: string | null;
+  @ApiProperty({
+    required: false,
+    nullable: true,
+    type: MessageReplyPreviewDto,
+  })
+  replyTo?: MessageReplyPreviewDto | null;
   @ApiProperty() createdAt!: string;
   @ApiProperty({ type: [String] }) deliveredTo!: string[];
   @ApiProperty({ type: [String] }) readBy!: string[];
-  @ApiProperty({ type: [AttachmentDto], required: false }) attachments?: AttachmentDto[];
+  @ApiProperty({ type: [AttachmentDto], required: false })
+  attachments?: AttachmentDto[];
 }
-

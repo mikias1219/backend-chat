@@ -48,8 +48,8 @@ export class UploadsController {
     @Req() req: Request,
     @CurrentUser() user: CurrentUserIdentity,
   ) {
-    const me = await this.rooms.ensureUser({ id: user.userId, name: user.name, email: user.email ?? null });
-    await this.rooms.joinRoom({ roomId, userId: me.id });
+    const me = await this.rooms.requireRegisteredUser(user.userId);
+    await this.rooms.requireMember(roomId, me.id);
 
     const mime = file?.mimetype || 'application/octet-stream';
     const kind: AttachmentKind = mime.startsWith('image/') ? AttachmentKind.IMAGE : AttachmentKind.FILE;

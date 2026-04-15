@@ -1,5 +1,10 @@
+import jwt from 'jsonwebtoken';
+
 function base64UrlDecode(input: string): string {
-  const padded = input.padEnd(input.length + ((4 - (input.length % 4)) % 4), '=');
+  const padded = input.padEnd(
+    input.length + ((4 - (input.length % 4)) % 4),
+    '=',
+  );
   const b64 = padded.replace(/-/g, '+').replace(/_/g, '/');
   return Buffer.from(b64, 'base64').toString('utf8');
 }
@@ -22,13 +27,37 @@ export type RequestIdentity = {
   email?: string;
 };
 
-export function identityFromBearer(authHeader: string | undefined): RequestIdentity | null {
+function shouldVerifyJwt(): boolean {
+  // Production default: verify if a secret is present.
+  // You can override in dev: REQUIRE_JWT_VERIFY=false
+  const explicit = (process.env.REQUIRE_JWT_VERIFY ?? '').toLowerCase();
+  if (explicit === 'false') return false;
+  if (explicit === 'true') return true;
+  return Boolean(process.env.JWT_SECRET);
+}
+
+async function verifyJwt(token: string): Promise<JwtClaims | null> {
+  if (!shouldVerifyJwt()) {
+    return decodeJwtNoVerify(token);
+  }
+  const secret = process.env.JWT_SECRET;
+  if (!secret) return null;
+  try {
+    return jwt.verify(token, secret, { algorithms: ['HS256'] }) as JwtClaims;
+  } catch {
+    return null;
+  }
+}
+
+export async function identityFromBearer(
+  authHeader: string | undefined,
+): Promise<RequestIdentity | null> {
   if (!authHeader) return null;
   const m = authHeader.match(/^Bearer\s+(.+)$/i);
   if (!m) return null;
   const token = m[1].trim();
   if (!token) return null;
-  const claims = decodeJwtNoVerify(token);
+  const claims = await verifyJwt(token);
   if (!claims) return null;
 
   const userId =
@@ -40,8 +69,9 @@ export function identityFromBearer(authHeader: string | undefined): RequestIdent
 
   return {
     userId,
-    name: (claims.name as string | undefined) ?? (claims.userName as string | undefined),
+    name:
+      (claims.name as string | undefined) ??
+      (claims.userName as string | undefined),
     email: claims.email as string | undefined,
   };
 }
-

@@ -1,24 +1,16 @@
-import { IsArray, IsOptional, IsString, MinLength } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { IsArray, IsOptional, IsString } from 'class-validator';
 
-export class SendMessageDto {
-  @ApiProperty()
-  @IsString()
-  @MinLength(1)
-  roomId!: string;
-
+export class CreateChatMessageDto {
   @ApiProperty({
     required: false,
-    description: 'Optional when sending attachments only',
+    description: 'Text body (optional if attachments are present)',
   })
-  @IsString()
   @IsOptional()
+  @IsString()
   body?: string;
 
-  @IsOptional()
-  @IsString()
-  clientId?: string;
-
+  @ApiProperty({ required: false })
   @IsOptional()
   @IsString()
   replyToId?: string;

@@ -5,4 +5,3 @@ export class JoinRoomDto {
   @MinLength(1)
   roomId!: string;
 }
-

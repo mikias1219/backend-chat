@@ -1,3 +1,5 @@
+/// Chat domain: users, rooms (direct + group), messages, receipts, attachments.
+/// Relationships are cascade-deleted from Room → members/messages/uploads.
 generator client {
   provider = "prisma-client-js"
   output   = "../src/generated/prisma"
@@ -7,12 +9,14 @@ datasource db {
   provider = "postgresql"
 }
 
+/// Participant in the system; owns memberships, messages, receipts, uploads.
 model User {
-  id        String   @id @default(uuid())
-  email     String?  @unique
-  name      String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String   @id @default(uuid())
+  email        String?  @unique
+  name         String
+  passwordHash String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   memberships RoomMember[]
   messages    Message[]
@@ -25,6 +29,7 @@ enum RoomType {
   GROUP
 }
 
+/// Conversation container: either a GROUP with many members or DIRECT (two users, unique directKey).
 model Room {
   id        String   @id @default(uuid())
   name      String
@@ -36,16 +41,19 @@ model Room {
   messages Message[]
   uploads  Attachment[]
 
-  // For DIRECT rooms only, we store a stable unique key like "userA:userB"
-  directKey String?  @unique
+  /// For DIRECT rooms only: stable key "userA:userB" (sorted ids) for idempotent room lookup.
+  directKey String? @unique
+
+  @@index([type, updatedAt])
 }
 
+/// Join table: which users belong to which room + per-user read pointers.
 model RoomMember {
-  roomId   String
-  userId   String
-  role     RoomRole  @default(MEMBER)
-  joinedAt DateTime  @default(now())
-  lastReadAt DateTime?
+  roomId            String
+  userId            String
+  role              RoomRole  @default(MEMBER)
+  joinedAt          DateTime  @default(now())
+  lastReadAt        DateTime?
   lastReadMessageId String?
 
   room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
@@ -54,6 +62,7 @@ model RoomMember {
   @@id([roomId, userId])
   @@index([userId])
   @@index([roomId, lastReadAt])
+  @@index([roomId, joinedAt])
 }
 
 enum RoomRole {
@@ -61,6 +70,7 @@ enum RoomRole {
   MEMBER
 }
 
+/// A chat line item; optional thread link via replyToId (same room only, enforced in app layer).
 model Message {
   id        String   @id @default(uuid())
   roomId    String
@@ -69,16 +79,17 @@ model Message {
   replyToId String?
   createdAt DateTime @default(now())
 
-  room    Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  replyTo Message? @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  room    Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replyTo Message?  @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
   replies Message[] @relation("MessageReplies")
 
-  receipts MessageReceipt[]
+  receipts    MessageReceipt[]
   attachments Attachment[]
 
   @@index([roomId, createdAt])
   @@index([userId, createdAt])
+  @@index([roomId, id])
 }
 
 enum AttachmentKind {
@@ -86,14 +97,15 @@ enum AttachmentKind {
   FILE
 }
 
+/// Binary payload metadata; may exist before a message claims it (messageId null while pending upload).
 model Attachment {
-  id         String         @id @default(uuid())
-  kind       AttachmentKind
-  fileName   String
-  mimeType   String
-  sizeBytes  Int
-  url        String
-  createdAt  DateTime       @default(now())
+  id        String         @id @default(uuid())
+  kind      AttachmentKind
+  fileName  String
+  mimeType  String
+  sizeBytes Int
+  url       String
+  createdAt DateTime       @default(now())
 
   roomId     String
   messageId  String?
@@ -106,6 +118,7 @@ model Attachment {
   @@index([roomId, createdAt])
   @@index([messageId])
   @@index([uploaderId, createdAt])
+  @@index([roomId, kind, createdAt])
 }
 
 enum ReceiptStatus {
@@ -113,6 +126,7 @@ enum ReceiptStatus {
   READ
 }
 
+/// Per-user delivery/read state for a message (composite PK includes status).
 model MessageReceipt {
   messageId String
   userId    String
@@ -124,5 +138,5 @@ model MessageReceipt {
 
   @@id([messageId, userId, status])
   @@index([userId, at])
+  @@index([messageId, status, at])
 }
-

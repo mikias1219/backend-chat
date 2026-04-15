@@ -30,7 +30,9 @@ async function bootstrap() {
   const swaggerPath = 'api/docs';
   const config = new DocumentBuilder()
     .setTitle('Selam Collaboration API')
-    .setDescription('NestJS REST API for chat + uploads (Socket.IO is separate).')
+    .setDescription(
+      'NestJS REST API for chat + uploads (Socket.IO is separate).',
+    )
     .setVersion('1.0.0')
     .addBearerAuth()
     // Use a relative server so Swagger works on localhost, ngrok, etc.

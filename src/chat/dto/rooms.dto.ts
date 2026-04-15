@@ -40,6 +40,11 @@ export class CreateRoomResponseDto {
   @ApiProperty({ type: ChatRoomDto }) room!: ChatRoomDto;
 }
 
+export class GetRoomResponseDto {
+  @ApiProperty() ok!: boolean;
+  @ApiProperty({ type: ChatRoomDto }) room!: ChatRoomDto;
+}
+
 export class CreateDmRequestDto {
   @ApiProperty()
   @IsString()
@@ -51,4 +56,3 @@ export class CreateDmRequestDto {
   @IsString()
   otherName?: string;
 }
-

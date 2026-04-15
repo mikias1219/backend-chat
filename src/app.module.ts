@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AuthModule } from './auth/auth.module';
 import { ChatModule } from './chat/chat.module';
 import { DatabaseModule } from './database/database.module';
 
@@ -10,6 +11,7 @@ import { DatabaseModule } from './database/database.module';
       envFilePath: ['.env', '.env.local'],
     }),
     DatabaseModule,
+    AuthModule,
     ChatModule,
   ],
 })

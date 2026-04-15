@@ -1,13 +1,15 @@
 # Selam Collaboration Backend (NestJS + Prisma + Postgres + Socket.IO)
 
-Production-minded chat backend designed to align cleanly with a modern frontend (Telegram/Slack-like UI).
+Production-minded **real-time chat backend** with **first-class auth**, designed to back a modern Telegram/Slack-like UI.
 
-## What you get
+## What you get (current)
 
+- **Auth (email/password)**: `POST /auth/register`, `POST /auth/login`, signed JWT (HS256)
 - **NestJS**: modular controllers/services + global validation
-- **PostgreSQL + Prisma**: real table relationships, receipts, unread tracking, attachments
-- **Socket.IO**: real-time chat (message, typing, presence, receipts)
-- **Swagger**: live API docs at `/api/docs`
+- **PostgreSQL + Prisma**: strict relationships for rooms/messages/receipts/attachments
+- **Socket.IO**: real-time chat (messages, typing, presence, receipts)
+- **Uploads**: room-scoped attachments served via `/uploads/*` in dev
+- **Swagger**: live API docs at `/api/docs` (+ `/api/docs-json`)
 - **Ngrok**: expose local dev server publicly (same origin for REST + WS)
 
 ## High-level architecture
@@ -16,8 +18,10 @@ Production-minded chat backend designed to align cleanly with a modern frontend 
 flowchart LR
   FE["Frontend (Next.js)"] -->|REST| API["NestJS REST (api/v1)"]
   FE -->|Socket.IO| WS["NestJS WS Gateway (/socket.io)"]
+  FE -->|Auth| AUTH["Auth REST (/auth)"]
   API --> SVC["Services (rooms/messages/uploads)"]
   WS --> SVC
+  AUTH --> PRISMA
   SVC --> PRISMA["Prisma Client"]
   PRISMA --> PG["PostgreSQL"]
   API --> UP["Static /uploads (dev)"]
@@ -33,17 +37,63 @@ cp .env.example .env
 
 ### Environment variables
 
-- **`DATABASE_URL`**: Postgres connection string
-  - Example: `postgresql://postgres:postgres@localhost:5432/selam?schema=public`
+- **`DATABASE_URL`**: Postgres connection string  
+  Example: `postgresql://postgres:postgres@localhost:5432/selam_collab?schema=public`
 - **`PORT`**: default `4000`
-- **`API_PREFIX`**: default `api/v1`
-- **`FRONTEND_URL`**: allowed CORS origins (comma-separated)
-  - Example: `http://localhost:3000,https://<your-ngrok-subdomain>.ngrok-free.dev`
+- **`API_PREFIX`**: default `api/v1` (REST base becomes `/api/v1/*`)
+- **`FRONTEND_URL`**: allowed CORS origins for REST + Socket.IO (comma-separated)  
+  Example: `http://localhost:3000,https://<your-ngrok-subdomain>.ngrok-free.dev`
+- **`JWT_SECRET`**: required in real deployments (used to sign + verify JWTs)
+- **`REQUIRE_JWT_VERIFY`**: `true` recommended (rejects unsigned/invalid JWTs)
+- **Socket.IO hardening**
+  - `SOCKET_REQUIRE_AUTH=true`
+  - `SOCKET_ALLOW_ANON=false`
+  - `SOCKET_PING_INTERVAL_MS=25000`
+  - `SOCKET_PING_TIMEOUT_MS=20000`
+  - `SOCKET_MAX_HTTP_BUFFER_BYTES=1000000`
+
+## Authentication (required)
+
+All chat endpoints require a valid **registered user**.
+
+### Register
+
+- `POST /api/v1/auth/register`
+- Body:
+
+```json
+{
+  "email": "demo@example.com",
+  "password": "password123",
+  "name": "Demo"
+}
+```
+
+Response:
+- `token`: JWT
+- `user`: `{ id, email, name }`
+
+### Login
+
+- `POST /api/v1/auth/login`
+- Body:
+
+```json
+{
+  "email": "demo@example.com",
+  "password": "password123"
+}
+```
+
+### Using the token
+
+- REST: send `Authorization: Bearer <token>`
+- Socket.IO: connect with `auth: { token: "<token>" }`
 
 ## Database: tables + relationships (diagram)
 
 Core entities:
-- **User**: chat participant
+- **User**: registered chat participant (email/passwordHash)
 - **Room**: group or direct room
 - **RoomMember**: join table (room ↔ user) + unread/read pointers
 - **Message**: message inside a room, optional reply-to
@@ -56,6 +106,7 @@ erDiagram
     string id PK
     string email
     string name
+    string passwordHash
     datetime createdAt
   }
 
@@ -87,11 +138,10 @@ erDiagram
   }
 
   MessageReceipt {
-    string id PK
-    string messageId FK
-    string userId FK
-    string status "DELIVERED|READ"
-    datetime createdAt
+    string messageId PK,FK
+    string userId PK,FK
+    string status PK "DELIVERED|READ"
+    datetime at
   }
 
   Attachment {
@@ -162,23 +212,27 @@ Your frontend should point to the ngrok domain like this:
 - **WS base**: `https://<subdomain>.ngrok-free.dev`
 
 If you use ngrok’s browser warning, ensure the frontend sends:
-- Header: `ngrok-skip-browser-warning: true` (REST)
-- Query param: `?ngrok-skip-browser-warning=true` (WS)
+- Header: `ngrok-skip-browser-warning: 1` (REST)
+- Query param: `?ngrok-skip-browser-warning=1` (WS)
 
 ## Request flow diagrams
 
-### 1) Join room + load history
+### 1) Auth + join room + load history
 
 ```mermaid
 sequenceDiagram
   participant FE as Frontend
+  participant AUTH as Auth REST
   participant WS as Socket.IO Gateway
   participant SVC as Rooms/Messages Services
   participant DB as PostgreSQL
 
+  FE->>AUTH: POST /auth/login (email/password)
+  AUTH-->>FE: { token }
+  FE->>WS: connect (auth.token = JWT)
   FE->>WS: chat:join { roomId }
-  WS->>SVC: ensureUser + joinRoom(roomId)
-  SVC->>DB: upsert User + RoomMember
+  WS->>SVC: requireRegisteredUser + joinRoom(roomId)
+  SVC->>DB: SELECT User + UPSERT RoomMember
   WS->>SVC: getRecent(roomId)
   SVC->>DB: SELECT messages (with receipts + attachments)
   WS-->>FE: chat:recent { roomId, messages[] }
@@ -234,12 +288,22 @@ sequenceDiagram
 
 Base prefix: `/api/v1`
 
+- **Auth**
+  - `POST /auth/register` → `{ ok, token, user }`
+  - `POST /auth/login` → `{ ok, token, user }`
 - **Rooms**
   - `GET /chat/rooms` → list rooms (includes members + `unreadCount`)
+  - `GET /chat/rooms/:roomId` → single room + members + unreadCount
+  - `POST /chat/rooms/:roomId/join` → join room (idempotent)
   - `POST /chat/rooms` → create group room
   - `POST /chat/dm` → create/get direct room
 - **Messages**
-  - `GET /chat/rooms/:roomId/messages?limit=50` → recent history
+  - `GET /chat/rooms/:roomId/messages?limit=50&before=<messageId>` → older history
+  - `GET /chat/rooms/:roomId/messages?limit=50&after=<messageId>` → forward history
+  - `POST /chat/rooms/:roomId/messages` → send message via REST (also broadcasts)
+  - `POST /chat/rooms/:roomId/typing` → HTTP mirror of typing
+  - `POST /chat/rooms/:roomId/receipts/delivered` → HTTP mirror of delivered
+  - `POST /chat/rooms/:roomId/receipts/read` → HTTP mirror of read
   - `POST /chat/rooms/:roomId/read` → mark read (optional `upToMessageId`)
 - **Uploads**
   - `POST /chat/rooms/:roomId/uploads` (multipart) → returns `attachment`
@@ -250,7 +314,7 @@ Base prefix: `/api/v1`
 Client → server:
 - `chat:join` `{ roomId }`
 - `chat:leave` `{ roomId }`
-- `chat:send` `{ roomId, body?, replyToId?, attachmentIds? }`
+- `chat:send` `{ roomId, body?, replyToId?, attachmentIds?, clientId? }`
 - `chat:typing` `{ roomId, isTyping }`
 - `chat:ack:delivered` `{ roomId, messageId }`
 - `chat:ack:read` `{ roomId, messageId }`
@@ -267,9 +331,12 @@ Server → client:
 
 - Local: `http://localhost:4000/api/docs`
 - Ngrok: `https://<subdomain>.ngrok-free.dev/api/docs`
+- JSON: `http://localhost:4000/api/docs-json`
 
 ## Notes (dev vs production)
 
 - `uploads/` is served as static files for **development**.
   - For production, swap to S3/R2 storage and signed URLs.
 - Don’t commit `.env` (this repo ignores it).
+- **Production**: always set `JWT_SECRET` and keep `REQUIRE_JWT_VERIFY=true`.
+- **Ngrok warning page**: for API calls, use `ngrok-skip-browser-warning: 1` header (or query param) to avoid HTML interstitials.

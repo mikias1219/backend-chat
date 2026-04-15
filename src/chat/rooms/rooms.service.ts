@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { RoomType } from '../../generated/prisma';
 import { PrismaService } from '../../database/prisma.service';
 
@@ -6,7 +11,18 @@ import { PrismaService } from '../../database/prisma.service';
 export class RoomsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async ensureUser(params: { id?: string; name?: string; email?: string | null }) {
+  async requireRegisteredUser(userId: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.email)
+      throw new UnauthorizedException('User is not registered');
+    return user;
+  }
+
+  async ensureUser(params: {
+    id?: string;
+    name?: string;
+    email?: string | null;
+  }) {
     const name = params.name?.trim() || 'Anonymous';
     const email = params.email?.trim() || null;
 
@@ -29,12 +45,43 @@ export class RoomsService {
     return this.prisma.user.create({ data: { name } });
   }
 
-  async ensureRoom(params: { id: string; name: string; type: RoomType; directKey?: string | null }) {
+  async ensureRoom(params: {
+    id: string;
+    name: string;
+    type: RoomType;
+    directKey?: string | null;
+  }) {
     return this.prisma.room.upsert({
       where: { id: params.id },
-      update: { name: params.name, type: params.type, directKey: params.directKey ?? null },
-      create: { id: params.id, name: params.name, type: params.type, directKey: params.directKey ?? null },
+      update: {
+        name: params.name,
+        type: params.type,
+        directKey: params.directKey ?? null,
+      },
+      create: {
+        id: params.id,
+        name: params.name,
+        type: params.type,
+        directKey: params.directKey ?? null,
+      },
     });
+  }
+
+  async requireMember(roomId: string, userId: string) {
+    const membership = await this.prisma.roomMember.findUnique({
+      where: { roomId_userId: { roomId, userId } },
+    });
+    if (!membership) throw new ForbiddenException('Not a room member');
+  }
+
+  async getRoomForUser(roomId: string, userId: string) {
+    await this.requireMember(roomId, userId);
+    const room = await this.prisma.room.findUnique({
+      where: { id: roomId },
+      include: { members: { include: { user: true } } },
+    });
+    if (!room) throw new NotFoundException('Room not found');
+    return room;
   }
 
   async joinRoom(params: { roomId: string; userId: string }) {
@@ -46,7 +93,9 @@ export class RoomsService {
     });
 
     await this.prisma.roomMember.upsert({
-      where: { roomId_userId: { roomId: params.roomId, userId: params.userId } },
+      where: {
+        roomId_userId: { roomId: params.roomId, userId: params.userId },
+      },
       update: {},
       create: { roomId: params.roomId, userId: params.userId },
     });
@@ -60,9 +109,18 @@ export class RoomsService {
     });
   }
 
-  async createGroupRoom(params: { id?: string; name: string; ownerId: string }) {
+  async createGroupRoom(params: {
+    id?: string;
+    name: string;
+    ownerId: string;
+  }) {
     const roomId = params.id ?? crypto.randomUUID();
-    const room = await this.ensureRoom({ id: roomId, name: params.name, type: RoomType.GROUP, directKey: null });
+    const room = await this.ensureRoom({
+      id: roomId,
+      name: params.name,
+      type: RoomType.GROUP,
+      directKey: null,
+    });
     await this.joinRoom({ roomId: room.id, userId: params.ownerId });
     return room;
   }
@@ -70,7 +128,9 @@ export class RoomsService {
   async ensureDirectRoom(params: { userA: string; userB: string }) {
     const [a, b] = [params.userA, params.userB].sort();
     const directKey = `${a}:${b}`;
-    const existing = await this.prisma.room.findUnique({ where: { directKey } });
+    const existing = await this.prisma.room.findUnique({
+      where: { directKey },
+    });
     if (existing) return existing;
 
     return this.prisma.room.create({
@@ -83,9 +143,15 @@ export class RoomsService {
     });
   }
 
-  async markRoomRead(params: { roomId: string; userId: string; upToMessageId?: string }) {
+  async markRoomRead(params: {
+    roomId: string;
+    userId: string;
+    upToMessageId?: string;
+  }) {
     const membership = await this.prisma.roomMember.findUnique({
-      where: { roomId_userId: { roomId: params.roomId, userId: params.userId } },
+      where: {
+        roomId_userId: { roomId: params.roomId, userId: params.userId },
+      },
     });
     if (!membership) throw new NotFoundException('Not a room member');
 
@@ -93,30 +159,38 @@ export class RoomsService {
     let lastReadMessageId = params.upToMessageId ?? null;
 
     if (params.upToMessageId) {
-      const msg = await this.prisma.message.findUnique({ where: { id: params.upToMessageId } });
-      if (!msg || msg.roomId !== params.roomId) throw new NotFoundException('Message not found in room');
+      const msg = await this.prisma.message.findUnique({
+        where: { id: params.upToMessageId },
+      });
+      if (!msg || msg.roomId !== params.roomId)
+        throw new NotFoundException('Message not found in room');
       lastReadAt = msg.createdAt;
       lastReadMessageId = msg.id;
     }
 
     await this.prisma.roomMember.update({
-      where: { roomId_userId: { roomId: params.roomId, userId: params.userId } },
+      where: {
+        roomId_userId: { roomId: params.roomId, userId: params.userId },
+      },
       data: { lastReadAt, lastReadMessageId },
     });
   }
 
   async getUnreadCount(params: { roomId: string; userId: string }) {
     const membership = await this.prisma.roomMember.findUnique({
-      where: { roomId_userId: { roomId: params.roomId, userId: params.userId } },
+      where: {
+        roomId_userId: { roomId: params.roomId, userId: params.userId },
+      },
     });
     if (!membership) return 0;
     return this.prisma.message.count({
       where: {
         roomId: params.roomId,
         userId: { not: params.userId },
-        createdAt: membership.lastReadAt ? { gt: membership.lastReadAt } : undefined,
+        createdAt: membership.lastReadAt
+          ? { gt: membership.lastReadAt }
+          : undefined,
       },
     });
   }
 }
-

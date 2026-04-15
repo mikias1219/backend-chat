@@ -7,4 +7,3 @@ export class MarkReadRequestDto {
   @IsString()
   upToMessageId?: string;
 }
-
