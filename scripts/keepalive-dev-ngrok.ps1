@@ -1,7 +1,21 @@
 $ErrorActionPreference = "Stop"
 
+function Stop-PortListener([int]$port) {
+  try {
+    $c = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($c -and $c.OwningProcess -gt 0) {
+      Write-Host ("Stopping process {0} on port {1}..." -f $c.OwningProcess, $port) -ForegroundColor DarkYellow
+      Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
+      Start-Sleep -Milliseconds 300
+    }
+  } catch {}
+}
+
 function Start-Backend {
   Write-Host "Starting backend (start:dev)..." -ForegroundColor Cyan
+  # Ensure only one backend is bound to 4000
+  Stop-PortListener 4000
+
   # Ensure JWT secret exists for auth signing/verification
   if (-not $env:JWT_SECRET -or $env:JWT_SECRET.Trim().Length -lt 8) {
     $env:JWT_SECRET = "dev-secret-change-me"
@@ -15,6 +29,8 @@ function Start-Backend {
 
 function Start-Ngrok {
   Write-Host "Starting ngrok tunnel..." -ForegroundColor Magenta
+  # Ensure only one ngrok is bound to 4040
+  Stop-PortListener 4040
   Start-Process -FilePath "npm" -ArgumentList @("run","ngrok") -WorkingDirectory (Join-Path $PSScriptRoot "..") -PassThru
 }
 
