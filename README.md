@@ -340,3 +340,18 @@ Server → client:
 - Don’t commit `.env` (this repo ignores it).
 - **Production**: always set `JWT_SECRET` and keep `REQUIRE_JWT_VERIFY=true`.
 - **Ngrok warning page**: for API calls, use `ngrok-skip-browser-warning: 1` header (or query param) to avoid HTML interstitials.
+
+## Data safety / never lose registered users
+
+- The backend **does not delete data** on its own. Data is only removed if you run destructive commands (like `prisma migrate reset`) or tests that intentionally clean the database.
+- The e2e test suite **creates and deletes** chat/auth data to keep tests isolated.
+  - It is now **guarded**: it refuses to run unless `E2E_CAN_DELETE_DATA=true`.
+
+## Keep backend + ngrok running (dev keep-alive)
+
+If you want a “always running” dev loop that restarts backend/ngrok automatically if either stops:
+
+```powershell
+cd backend
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keepalive-dev-ngrok.ps1
+```

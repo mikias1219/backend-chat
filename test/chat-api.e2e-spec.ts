@@ -49,6 +49,14 @@ describe('Chat API (e2e)', () => {
   let prisma: PrismaService;
 
   beforeAll(async () => {
+    // Safety: these tests create and DELETE data.
+    // They MUST NOT be run against any environment you care about.
+    if (process.env.E2E_CAN_DELETE_DATA !== 'true') {
+      throw new Error(
+        'Refusing to run e2e tests because they delete DB data. Set E2E_CAN_DELETE_DATA=true to run.',
+      );
+    }
+
     process.env.JWT_SECRET = process.env.JWT_SECRET ?? 'test-secret';
     process.env.REQUIRE_JWT_VERIFY = 'true';
     process.env.API_PREFIX = process.env.API_PREFIX ?? 'api/v1';
@@ -253,6 +261,7 @@ describe('Chat API (e2e)', () => {
 
   afterEach(async () => {
     // Keep DB tidy between tests (dev DB)
+    // (Guarded by E2E_CAN_DELETE_DATA=true in beforeAll)
     await prisma.messageReceipt.deleteMany();
     await prisma.attachment.deleteMany();
     await prisma.message.deleteMany();
