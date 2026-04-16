@@ -12,6 +12,7 @@ import {
 import {
   ApiBearerAuth,
   ApiCreatedResponse,
+  ApiExcludeEndpoint,
   ApiOkResponse,
   ApiOperation,
   ApiParam,
@@ -33,7 +34,7 @@ import { TypingRequestDto } from '../dto/typing-request.dto';
 import { RoomsService } from '../rooms/rooms.service';
 import { MessagesService } from './messages.service';
 
-@ApiTags('chat-messages')
+@ApiTags('chat-messages', 'chat-channels', 'chat-direct')
 @ApiBearerAuth()
 @UseGuards(BearerAuthGuard)
 @Controller('chat')
@@ -45,6 +46,7 @@ export class MessagesController {
   ) {}
 
   @Get('rooms/:roomId/messages')
+  @ApiExcludeEndpoint()
   @ApiOperation({
     summary: 'List messages in a room (cursor pagination: before / after)',
   })
@@ -58,7 +60,10 @@ export class MessagesController {
     if (query.before && query.after) {
       throw new BadRequestException('Use only one of before or after');
     }
-    const me = await this.rooms.requireRegisteredUser(user.userId);
+    const me = await this.rooms.requireRegisteredUser(user.userId, {
+      name: user.name,
+      email: user.email ?? null,
+    });
     await this.rooms.requireMember(roomId, me.id);
     const parsed = query.limit;
     const safeLimit = Number.isFinite(parsed) ? parsed! : 50;
@@ -70,7 +75,36 @@ export class MessagesController {
     }) as unknown as ChatMessageDto[];
   }
 
+  @Get('channels/:channelId/messages')
+  @ApiOperation({
+    summary: 'List messages in a channel (cursor pagination: before / after)',
+  })
+  @ApiParam({ name: 'channelId', required: true })
+  @ApiOkResponse({ type: [ChatMessageDto] })
+  async getChannelMessages(
+    @Param('channelId') channelId: string,
+    @Query() query: ListMessagesQueryDto,
+    @CurrentUser() user: CurrentUserIdentity,
+  ): Promise<ChatMessageDto[]> {
+    return this.getRoomMessages(channelId, query, user);
+  }
+
+  @Get('direct/:directId/messages')
+  @ApiOperation({
+    summary: 'List messages in a private direct chat (cursor pagination)',
+  })
+  @ApiParam({ name: 'directId', required: true })
+  @ApiOkResponse({ type: [ChatMessageDto] })
+  async getDirectMessages(
+    @Param('directId') directId: string,
+    @Query() query: ListMessagesQueryDto,
+    @CurrentUser() user: CurrentUserIdentity,
+  ): Promise<ChatMessageDto[]> {
+    return this.getRoomMessages(directId, query, user);
+  }
+
   @Post('rooms/:roomId/messages')
+  @ApiExcludeEndpoint()
   @HttpCode(201)
   @ApiOperation({
     summary: 'Send a message (broadcasts over Socket.IO as chat:message)',
@@ -82,7 +116,10 @@ export class MessagesController {
     @Body() body: CreateChatMessageDto,
     @CurrentUser() user: CurrentUserIdentity,
   ) {
-    const me = await this.rooms.requireRegisteredUser(user.userId);
+    const me = await this.rooms.requireRegisteredUser(user.userId, {
+      name: user.name,
+      email: user.email ?? null,
+    });
     const message = await this.coordinator.sendMessage({
       roomId,
       identity: { userId: me.id, name: me.name, email: me.email },
@@ -93,7 +130,38 @@ export class MessagesController {
     return { ok: true, message };
   }
 
+  @Post('channels/:channelId/messages')
+  @HttpCode(201)
+  @ApiOperation({
+    summary: 'Send a message to a channel',
+  })
+  @ApiParam({ name: 'channelId', required: true })
+  @ApiCreatedResponse({ type: PostChatMessageResponseDto })
+  async postChannelMessage(
+    @Param('channelId') channelId: string,
+    @Body() body: CreateChatMessageDto,
+    @CurrentUser() user: CurrentUserIdentity,
+  ) {
+    return this.postRoomMessage(channelId, body, user);
+  }
+
+  @Post('direct/:directId/messages')
+  @HttpCode(201)
+  @ApiOperation({
+    summary: 'Send a message to a private direct chat',
+  })
+  @ApiParam({ name: 'directId', required: true })
+  @ApiCreatedResponse({ type: PostChatMessageResponseDto })
+  async postDirectMessage(
+    @Param('directId') directId: string,
+    @Body() body: CreateChatMessageDto,
+    @CurrentUser() user: CurrentUserIdentity,
+  ) {
+    return this.postRoomMessage(directId, body, user);
+  }
+
   @Post('rooms/:roomId/typing')
+  @ApiExcludeEndpoint()
   @HttpCode(200)
   @ApiOperation({ summary: 'Typing indicator (HTTP mirror of chat:typing)' })
   @ApiParam({ name: 'roomId', required: true })
@@ -111,7 +179,34 @@ export class MessagesController {
     return { ok: true };
   }
 
+  @Post('channels/:channelId/typing')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Channel typing indicator' })
+  @ApiParam({ name: 'channelId', required: true })
+  @ApiOkResponse({ type: OkResponseDto })
+  async postChannelTyping(
+    @Param('channelId') channelId: string,
+    @Body() body: TypingRequestDto,
+    @CurrentUser() user: CurrentUserIdentity,
+  ) {
+    return this.postTyping(channelId, body, user);
+  }
+
+  @Post('direct/:directId/typing')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Direct chat typing indicator' })
+  @ApiParam({ name: 'directId', required: true })
+  @ApiOkResponse({ type: OkResponseDto })
+  async postDirectTyping(
+    @Param('directId') directId: string,
+    @Body() body: TypingRequestDto,
+    @CurrentUser() user: CurrentUserIdentity,
+  ) {
+    return this.postTyping(directId, body, user);
+  }
+
   @Post('rooms/:roomId/receipts/delivered')
+  @ApiExcludeEndpoint()
   @HttpCode(200)
   @ApiOperation({
     summary:
@@ -133,7 +228,38 @@ export class MessagesController {
     return { ok: true };
   }
 
+  @Post('channels/:channelId/receipts/delivered')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Mark channel message delivered',
+  })
+  @ApiParam({ name: 'channelId', required: true })
+  @ApiOkResponse({ type: OkResponseDto })
+  async postChannelDelivered(
+    @Param('channelId') channelId: string,
+    @Body() body: ReceiptRequestDto,
+    @CurrentUser() user: CurrentUserIdentity,
+  ) {
+    return this.postDelivered(channelId, body, user);
+  }
+
+  @Post('direct/:directId/receipts/delivered')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Mark direct message delivered',
+  })
+  @ApiParam({ name: 'directId', required: true })
+  @ApiOkResponse({ type: OkResponseDto })
+  async postDirectDelivered(
+    @Param('directId') directId: string,
+    @Body() body: ReceiptRequestDto,
+    @CurrentUser() user: CurrentUserIdentity,
+  ) {
+    return this.postDelivered(directId, body, user);
+  }
+
   @Post('rooms/:roomId/receipts/read')
+  @ApiExcludeEndpoint()
   @HttpCode(200)
   @ApiOperation({
     summary:
@@ -155,7 +281,38 @@ export class MessagesController {
     return { ok: true };
   }
 
+  @Post('channels/:channelId/receipts/read')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Mark channel message read',
+  })
+  @ApiParam({ name: 'channelId', required: true })
+  @ApiOkResponse({ type: OkResponseDto })
+  async postChannelReadReceipt(
+    @Param('channelId') channelId: string,
+    @Body() body: ReceiptRequestDto,
+    @CurrentUser() user: CurrentUserIdentity,
+  ) {
+    return this.postReadReceipt(channelId, body, user);
+  }
+
+  @Post('direct/:directId/receipts/read')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Mark direct message read',
+  })
+  @ApiParam({ name: 'directId', required: true })
+  @ApiOkResponse({ type: OkResponseDto })
+  async postDirectReadReceipt(
+    @Param('directId') directId: string,
+    @Body() body: ReceiptRequestDto,
+    @CurrentUser() user: CurrentUserIdentity,
+  ) {
+    return this.postReadReceipt(directId, body, user);
+  }
+
   @Post('rooms/:roomId/read')
+  @ApiExcludeEndpoint()
   @HttpCode(200)
   @ApiOperation({ summary: 'Mark room as read up to a message (or now)' })
   @ApiParam({ name: 'roomId', required: true })
@@ -165,7 +322,10 @@ export class MessagesController {
     @Body() body: MarkReadRequestDto,
     @CurrentUser() user: CurrentUserIdentity,
   ) {
-    const me = await this.rooms.requireRegisteredUser(user.userId);
+    const me = await this.rooms.requireRegisteredUser(user.userId, {
+      name: user.name,
+      email: user.email ?? null,
+    });
     await this.rooms.requireMember(roomId, me.id);
     await this.rooms.markRoomRead({
       roomId,
@@ -173,5 +333,33 @@ export class MessagesController {
       upToMessageId: body.upToMessageId,
     });
     return { ok: true };
+  }
+
+  @Post('channels/:channelId/read')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Mark channel as read up to a message (or now)' })
+  @ApiParam({ name: 'channelId', required: true })
+  @ApiOkResponse({ type: OkResponseDto })
+  async markChannelRead(
+    @Param('channelId') channelId: string,
+    @Body() body: MarkReadRequestDto,
+    @CurrentUser() user: CurrentUserIdentity,
+  ) {
+    return this.markRead(channelId, body, user);
+  }
+
+  @Post('direct/:directId/read')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Mark direct chat as read up to a message (or now)',
+  })
+  @ApiParam({ name: 'directId', required: true })
+  @ApiOkResponse({ type: OkResponseDto })
+  async markDirectRead(
+    @Param('directId') directId: string,
+    @Body() body: MarkReadRequestDto,
+    @CurrentUser() user: CurrentUserIdentity,
+  ) {
+    return this.markRead(directId, body, user);
   }
 }

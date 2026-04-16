@@ -1,20 +1,43 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
-  UnauthorizedException,
 } from '@nestjs/common';
-import { RoomType } from '../../generated/prisma';
+import { Prisma, RoomRole, RoomType } from '../../generated/prisma';
 import { PrismaService } from '../../database/prisma.service';
 
 @Injectable()
 export class RoomsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async requireRegisteredUser(userId: string) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (!user || !user.email)
-      throw new UnauthorizedException('User is not registered');
+  async requireRegisteredUser(
+    userId: string,
+    defaults?: { name?: string; email?: string | null },
+  ) {
+    let user = await this.prisma.user.findUnique({ where: { id: userId } });
+
+    if (!user) {
+      user = await this.ensureUser({
+        id: userId,
+        name: defaults?.name,
+        email: defaults?.email ?? null,
+      });
+      return user;
+    }
+
+    const nextName = defaults?.name?.trim();
+    const nextEmail = defaults?.email?.trim();
+    if ((nextName && nextName !== user.name) || (nextEmail && !user.email)) {
+      user = await this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          ...(nextName ? { name: nextName } : {}),
+          ...(nextEmail && !user.email ? { email: nextEmail } : {}),
+        },
+      });
+    }
+
     return user;
   }
 
@@ -72,40 +95,137 @@ export class RoomsService {
       where: { roomId_userId: { roomId, userId } },
     });
     if (!membership) throw new ForbiddenException('Not a room member');
+    return membership;
+  }
+
+  private async requireGroupRoom(roomId: string) {
+    const room = await this.prisma.room.findUnique({
+      where: { id: roomId },
+      select: { id: true, type: true },
+    });
+    if (!room) throw new NotFoundException('Room not found');
+    if (room.type !== RoomType.GROUP) {
+      throw new ForbiddenException('Only group channels can be managed');
+    }
+    return room;
+  }
+
+  private async requireGroupOwner(roomId: string, userId: string) {
+    await this.requireGroupRoom(roomId);
+    const membership = await this.requireMember(roomId, userId);
+    if (membership.role !== RoomRole.OWNER) {
+      throw new ForbiddenException(
+        'Only channel owners can perform this action',
+      );
+    }
+    return membership;
+  }
+
+  private async getRoomWithDetails(roomId: string) {
+    const room = await this.prisma.room.findUnique({
+      where: { id: roomId },
+      include: {
+        members: { include: { user: true } },
+        messages: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          include: {
+            user: true,
+            attachments: { select: { id: true } },
+          },
+        },
+      },
+    });
+    if (!room) throw new NotFoundException('Room not found');
+    return room;
   }
 
   async getRoomForUser(roomId: string, userId: string) {
     await this.requireMember(roomId, userId);
     const room = await this.prisma.room.findUnique({
       where: { id: roomId },
-      include: { members: { include: { user: true } } },
+      include: {
+        members: { include: { user: true } },
+        messages: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          include: {
+            user: true,
+            attachments: { select: { id: true } },
+          },
+        },
+      },
     });
     if (!room) throw new NotFoundException('Room not found');
     return room;
   }
 
-  async joinRoom(params: { roomId: string; userId: string }) {
-    await this.ensureRoom({
-      id: params.roomId,
-      name: params.roomId,
-      type: params.roomId.startsWith('dm:') ? RoomType.DIRECT : RoomType.GROUP,
-      directKey: null,
+  async joinRoom(params: { roomId: string; userId: string; role?: RoomRole }) {
+    const room = await this.prisma.room.findUnique({
+      where: { id: params.roomId },
+      select: { id: true },
     });
+    if (!room) {
+      throw new NotFoundException('Room not found');
+    }
+
+    if (!params.role) {
+      await this.requireMember(params.roomId, params.userId);
+      return;
+    }
 
     await this.prisma.roomMember.upsert({
       where: {
         roomId_userId: { roomId: params.roomId, userId: params.userId },
       },
-      update: {},
-      create: { roomId: params.roomId, userId: params.userId },
+      update: params.role ? { role: params.role } : {},
+      create: {
+        roomId: params.roomId,
+        userId: params.userId,
+        role: params.role ?? RoomRole.MEMBER,
+      },
     });
   }
 
-  async listRoomsForUser(userId: string) {
+  async listRoomsForUser(userId: string, type?: RoomType) {
     return this.prisma.room.findMany({
-      where: { members: { some: { userId } } },
+      where: {
+        members: { some: { userId } },
+        ...(type ? { type } : {}),
+      },
       orderBy: { updatedAt: 'desc' },
-      include: { members: { include: { user: true } } },
+      include: {
+        members: { include: { user: true } },
+        messages: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          include: {
+            user: true,
+            attachments: { select: { id: true } },
+          },
+        },
+      },
+    });
+  }
+
+  async listDirectoryUsers(params: { excludeUserId: string; query?: string }) {
+    const search = params.query?.trim();
+    const where: Prisma.UserWhereInput = {
+      id: { not: params.excludeUserId },
+    };
+
+    if (search) {
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { email: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
+    return this.prisma.user.findMany({
+      where,
+      select: { id: true, name: true, email: true },
+      orderBy: [{ name: 'asc' }, { email: 'asc' }],
+      take: 200,
     });
   }
 
@@ -121,7 +241,11 @@ export class RoomsService {
       type: RoomType.GROUP,
       directKey: null,
     });
-    await this.joinRoom({ roomId: room.id, userId: params.ownerId });
+    await this.joinRoom({
+      roomId: room.id,
+      userId: params.ownerId,
+      role: RoomRole.OWNER,
+    });
     return room;
   }
 
@@ -192,5 +316,135 @@ export class RoomsService {
           : undefined,
       },
     });
+  }
+
+  async updateGroupRoomName(params: {
+    roomId: string;
+    actorUserId: string;
+    name: string;
+  }) {
+    const nextName = params.name.trim();
+    if (!nextName) throw new BadRequestException('Room name is required');
+    await this.requireGroupOwner(params.roomId, params.actorUserId);
+    await this.prisma.room.update({
+      where: { id: params.roomId },
+      data: { name: nextName },
+    });
+    return this.getRoomWithDetails(params.roomId);
+  }
+
+  async addGroupMembers(params: {
+    roomId: string;
+    actorUserId: string;
+    userIds: string[];
+  }) {
+    await this.requireGroupOwner(params.roomId, params.actorUserId);
+    const normalized = Array.from(
+      new Set(params.userIds.map((id) => id.trim()).filter(Boolean)),
+    );
+    if (!normalized.length) {
+      throw new BadRequestException('At least one userId is required');
+    }
+    await Promise.all(normalized.map((id) => this.requireRegisteredUser(id)));
+    await this.prisma.$transaction(
+      normalized.map((userId) =>
+        this.prisma.roomMember.upsert({
+          where: {
+            roomId_userId: { roomId: params.roomId, userId },
+          },
+          update: {},
+          create: {
+            roomId: params.roomId,
+            userId,
+            role: RoomRole.MEMBER,
+          },
+        }),
+      ),
+    );
+    return this.getRoomWithDetails(params.roomId);
+  }
+
+  async removeGroupMember(params: {
+    roomId: string;
+    actorUserId: string;
+    targetUserId: string;
+  }) {
+    const targetUserId = params.targetUserId.trim();
+    if (!targetUserId)
+      throw new BadRequestException('targetUserId is required');
+    await this.requireGroupOwner(params.roomId, params.actorUserId);
+    if (targetUserId === params.actorUserId) {
+      throw new BadRequestException(
+        'Owners cannot remove themselves. Use leave room instead.',
+      );
+    }
+    const membership = await this.prisma.roomMember.findUnique({
+      where: {
+        roomId_userId: { roomId: params.roomId, userId: targetUserId },
+      },
+    });
+    if (!membership) throw new NotFoundException('Member not found in room');
+    if (membership.role === RoomRole.OWNER) {
+      throw new ForbiddenException(
+        'Cannot remove another owner. Transfer ownership first.',
+      );
+    }
+    await this.prisma.roomMember.delete({
+      where: {
+        roomId_userId: { roomId: params.roomId, userId: targetUserId },
+      },
+    });
+    return this.getRoomWithDetails(params.roomId);
+  }
+
+  async leaveGroupRoom(params: { roomId: string; userId: string }) {
+    await this.requireGroupRoom(params.roomId);
+    const membership = await this.prisma.roomMember.findUnique({
+      where: {
+        roomId_userId: { roomId: params.roomId, userId: params.userId },
+      },
+    });
+    if (!membership) throw new NotFoundException('Member not found in room');
+
+    await this.prisma.$transaction(async (tx) => {
+      if (membership.role === RoomRole.OWNER) {
+        const nextOwner = await tx.roomMember.findFirst({
+          where: {
+            roomId: params.roomId,
+            userId: { not: params.userId },
+          },
+          orderBy: { joinedAt: 'asc' },
+        });
+        if (nextOwner) {
+          await tx.roomMember.update({
+            where: {
+              roomId_userId: {
+                roomId: params.roomId,
+                userId: nextOwner.userId,
+              },
+            },
+            data: { role: RoomRole.OWNER },
+          });
+        }
+      }
+
+      await tx.roomMember.delete({
+        where: {
+          roomId_userId: { roomId: params.roomId, userId: params.userId },
+        },
+      });
+
+      const remaining = await tx.roomMember.count({
+        where: { roomId: params.roomId },
+      });
+      if (remaining === 0) {
+        await tx.room.delete({ where: { id: params.roomId } });
+      }
+    });
+  }
+
+  async deleteGroupRoom(params: { roomId: string; actorUserId: string }) {
+    await this.requireGroupOwner(params.roomId, params.actorUserId);
+    await this.prisma.room.delete({ where: { id: params.roomId } });
   }
 }

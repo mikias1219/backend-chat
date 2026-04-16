@@ -1,104 +1,52 @@
-# Selam Collaboration Backend (NestJS + Prisma + Postgres + Socket.IO)
+# Selam Collaboration Chat Backend
 
-Production-minded **real-time chat backend** with **first-class auth**, designed to back a modern Telegram/Slack-like UI.
+Real-time chat backend built with NestJS, Prisma, PostgreSQL, and Socket.IO.
 
-## What you get (current)
+This backend is now **chat-only**:
+- no local login/register endpoints
+- identity comes from an external auth system via `Authorization: Bearer <token>`
+- chat features are separated into **Channels** and **Private (Direct) chats**
 
-- **Auth (email/password)**: `POST /auth/register`, `POST /auth/login`, signed JWT (HS256)
-- **NestJS**: modular controllers/services + global validation
-- **PostgreSQL + Prisma**: strict relationships for rooms/messages/receipts/attachments
-- **Socket.IO**: real-time chat (messages, typing, presence, receipts)
-- **Uploads**: room-scoped attachments served via `/uploads/*` in dev
-- **Swagger**: live API docs at `/api/docs` (+ `/api/docs-json`)
-- **Ngrok**: expose local dev server publicly (same origin for REST + WS)
+---
 
-## High-level architecture
+## What changed (latest)
+
+- Added explicit API separation:
+  - **Channels**: group management and membership CRUD
+  - **Direct**: private one-to-one conversations
+- Channel membership management is restricted to group channels only.
+- Swagger now exposes dedicated `chat-channels` and `chat-direct` routes.
+- Legacy `/chat/rooms/*` routes are still available for backward compatibility, but are hidden from Swagger.
+
+---
+
+## Architecture overview
 
 ```mermaid
 flowchart LR
-  FE["Frontend (Next.js)"] -->|REST| API["NestJS REST (api/v1)"]
-  FE -->|Socket.IO| WS["NestJS WS Gateway (/socket.io)"]
-  FE -->|Auth| AUTH["Auth REST (/auth)"]
-  API --> SVC["Services (rooms/messages/uploads)"]
+  FE["Frontend (Next.js)"] -->|REST /api/v1/chat/*| API["NestJS REST"]
+  FE -->|Socket.IO /socket.io| WS["NestJS Gateway"]
+  FE -->|Bearer token| AUTH["External Auth Backend"]
+  API --> SVC["Rooms / Messages / Uploads services"]
   WS --> SVC
-  AUTH --> PRISMA
   SVC --> PRISMA["Prisma Client"]
   PRISMA --> PG["PostgreSQL"]
-  API --> UP["Static /uploads (dev)"]
+  API --> UP["/uploads (dev static)"]
 ```
 
-## Local setup
+---
 
-```bash
-cd backend
-npm install
-cp .env.example .env
-```
+## Updated data model and table relationships
 
-### Environment variables
-
-- **`DATABASE_URL`**: Postgres connection string  
-  Example: `postgresql://postgres:postgres@localhost:5432/selam_collab?schema=public`
-- **`PORT`**: default `4000`
-- **`API_PREFIX`**: default `api/v1` (REST base becomes `/api/v1/*`)
-- **`FRONTEND_URL`**: allowed CORS origins for REST + Socket.IO (comma-separated)  
-  Example: `http://localhost:3000,https://<your-ngrok-subdomain>.ngrok-free.dev`
-- **`JWT_SECRET`**: required in real deployments (used to sign + verify JWTs)
-- **`REQUIRE_JWT_VERIFY`**: `true` recommended (rejects unsigned/invalid JWTs)
-- **Socket.IO hardening**
-  - `SOCKET_REQUIRE_AUTH=true`
-  - `SOCKET_ALLOW_ANON=false`
-  - `SOCKET_PING_INTERVAL_MS=25000`
-  - `SOCKET_PING_TIMEOUT_MS=20000`
-  - `SOCKET_MAX_HTTP_BUFFER_BYTES=1000000`
-
-## Authentication (required)
-
-All chat endpoints require a valid **registered user**.
-
-### Register
-
-- `POST /api/v1/auth/register`
-- Body:
-
-```json
-{
-  "email": "demo@example.com",
-  "password": "password123",
-  "name": "Demo"
-}
-```
-
-Response:
-- `token`: JWT
-- `user`: `{ id, email, name }`
-
-### Login
-
-- `POST /api/v1/auth/login`
-- Body:
-
-```json
-{
-  "email": "demo@example.com",
-  "password": "password123"
-}
-```
-
-### Using the token
-
-- REST: send `Authorization: Bearer <token>`
-- Socket.IO: connect with `auth: { token: "<token>" }`
-
-## Database: tables + relationships (diagram)
+Current schema already supports the latest behavior; no new migration is required for the recent channel/direct split.
 
 Core entities:
-- **User**: registered chat participant (email/passwordHash)
-- **Room**: group or direct room
-- **RoomMember**: join table (room ↔ user) + unread/read pointers
-- **Message**: message inside a room, optional reply-to
-- **MessageReceipt**: delivered/read per user per message
-- **Attachment**: uploaded file/image, linked to a room and optionally to a message
+- `User`: chat participant identity (mirrored/provisioned from token claims)
+- `Room` (internal table): conversation container (`GROUP` or `DIRECT`)
+- `RoomMember`: membership and role (`OWNER` / `MEMBER`)
+- `Message`: message body, sender, optional reply
+- `MessageReceipt`: delivery/read tracking
+- `Attachment`: file/image metadata
 
 ```mermaid
 erDiagram
@@ -107,14 +55,13 @@ erDiagram
     string email
     string name
     string passwordHash
-    datetime createdAt
   }
 
   Room {
     string id PK
     string name
-    string type "DIRECT|GROUP"
-    string directKey
+    string type "GROUP|DIRECT"
+    string directKey "unique for DIRECT"
     datetime createdAt
     datetime updatedAt
   }
@@ -122,7 +69,7 @@ erDiagram
   RoomMember {
     string roomId PK,FK
     string userId PK,FK
-    string role
+    string role "OWNER|MEMBER"
     datetime joinedAt
     datetime lastReadAt
     string lastReadMessageId
@@ -147,211 +94,194 @@ erDiagram
   Attachment {
     string id PK
     string kind "IMAGE|FILE"
-    string fileName
-    string mimeType
-    int sizeBytes
-    string url
     string roomId FK
     string messageId FK
     string uploaderId FK
-    datetime createdAt
   }
 
-  User ||--o{ RoomMember : "joins"
-  Room ||--o{ RoomMember : "has"
-
-  Room ||--o{ Message : "contains"
-  User ||--o{ Message : "sends"
-  Message ||--o{ Message : "replies-to"
-
-  Message ||--o{ MessageReceipt : "has"
-  User ||--o{ MessageReceipt : "acks"
-
-  Room ||--o{ Attachment : "stores"
-  User ||--o{ Attachment : "uploads"
-  Message ||--o{ Attachment : "claims"
+  User ||--o{ RoomMember : joins
+  Room ||--o{ RoomMember : has
+  Room ||--o{ Message : contains
+  User ||--o{ Message : sends
+  Message ||--o{ MessageReceipt : has
+  User ||--o{ MessageReceipt : acknowledges
+  Room ||--o{ Attachment : stores
+  User ||--o{ Attachment : uploads
+  Message ||--o{ Attachment : links
 ```
 
-## Migrate + seed
+### Channel vs Direct rules
+
+- `Room.type = GROUP` (API name: **Channel**):
+  - can rename/delete channel (owner only)
+  - can add/remove members (owner only)
+  - members can leave
+- `Room.type = DIRECT` (API name: **Direct chat**):
+  - only participants can view/send
+  - no add/remove member operations
+  - one unique room per user pair via `directKey`
+
+> Clarification: in database and internal service code we still use the word `Room` as the technical conversation table.
+> In API and Swagger, use **Channel** for groups and **Direct** for private chats.
+
+---
+
+## How components communicate
+
+### 1) Open chat list
+```mermaid
+sequenceDiagram
+  participant FE as Frontend
+  participant API as Chat REST
+  participant DB as PostgreSQL
+
+  FE->>API: GET /chat/direct
+  API->>DB: list rooms where member && type=DIRECT
+  API-->>FE: direct rooms
+
+  FE->>API: GET /chat/channels
+  API->>DB: list rooms where member && type=GROUP
+  API-->>FE: channel rooms
+```
+
+### 2) Start private chat
+```mermaid
+sequenceDiagram
+  participant FE as Frontend
+  participant API as Chat REST
+  participant DB as PostgreSQL
+
+  FE->>API: POST /chat/direct { otherUserId }
+  API->>DB: find/create DIRECT room by directKey
+  API-->>FE: room
+```
+
+### 3) Channel member management
+```mermaid
+sequenceDiagram
+  participant FE as Frontend
+  participant API as Chat REST
+  participant DB as PostgreSQL
+
+  FE->>API: POST /chat/channels/:channelId/members
+  API->>DB: verify actor OWNER && room GROUP
+  API->>DB: upsert RoomMember rows
+  API-->>FE: updated channel
+
+  FE->>API: DELETE /chat/channels/:channelId/members/:memberId
+  API->>DB: verify actor OWNER && room GROUP
+  API->>DB: delete RoomMember row
+  API-->>FE: updated channel
+```
+
+### 4) Real-time messaging
+- REST is used for listing and uploads.
+- Socket.IO handles live events (`chat:join`, `chat:send`, `chat:typing`, receipts).
+
+---
+
+## API groups (preferred routes)
+
+Base prefix: `/api/v1`
+
+### Channels (`chat-channels`)
+- `GET /chat/channels`
+- `POST /chat/channels`
+- `POST /chat/channels/:channelId/join`
+- `PATCH /chat/channels/:channelId`
+- `DELETE /chat/channels/:channelId`
+- `POST /chat/channels/:channelId/members`
+- `DELETE /chat/channels/:channelId/members/:memberId`
+- `POST /chat/channels/:channelId/leave`
+- `GET /chat/channels/:channelId/messages`
+- `POST /chat/channels/:channelId/messages`
+- `POST /chat/channels/:channelId/typing`
+- `POST /chat/channels/:channelId/receipts/delivered`
+- `POST /chat/channels/:channelId/receipts/read`
+- `POST /chat/channels/:channelId/read`
+- `POST /chat/channels/:channelId/uploads`
+
+### Direct (`chat-direct`)
+- `GET /chat/direct`
+- `POST /chat/direct`
+- `POST /chat/direct/:directId/access`
+- `GET /chat/direct/:directId/messages`
+- `POST /chat/direct/:directId/messages`
+- `POST /chat/direct/:directId/typing`
+- `POST /chat/direct/:directId/receipts/delivered`
+- `POST /chat/direct/:directId/receipts/read`
+- `POST /chat/direct/:directId/read`
+- `POST /chat/direct/:directId/uploads`
+- `GET /chat/users` (directory for starting direct chats)
+
+### Backward-compatible legacy routes
+- `GET /chat/rooms`
+- `POST /chat/rooms`
+- `PATCH /chat/rooms/:roomId`
+- `DELETE /chat/rooms/:roomId`
+- `POST /chat/rooms/:roomId/members`
+- `DELETE /chat/rooms/:roomId/members/:memberId`
+- `POST /chat/rooms/:roomId/leave`
+- `POST /chat/dm`
+
+---
+
+## Swagger
+
+- Local: `http://localhost:4000/api/docs`
+- JSON: `http://localhost:4000/api/docs-json`
+- Ngrok: `https://<your-ngrok-domain>/api/docs`
+
+Swagger tags now include:
+- `chat-channels`
+- `chat-direct`
+- `chat-messages`
+- `chat-uploads`
+
+---
+
+## Local development
 
 ```bash
 cd backend
+npm install
+cp .env.example .env
 npm run prisma:migrate
-npm run prisma:seed
-```
-
-## Run the server
-
-```bash
-cd backend
 npm run dev
 ```
 
 Defaults:
-- **REST base**: `http://localhost:4000/api/v1`
-- **Swagger**: `http://localhost:4000/api/docs`
-- **Socket.IO**: `http://localhost:4000` (same origin)
+- REST: `http://localhost:4000/api/v1`
+- Swagger: `http://localhost:4000/api/docs`
+- Socket.IO: `http://localhost:4000/socket.io`
 
-## Ngrok (development)
+---
 
-### Start ngrok
+## Environment variables (important)
+
+- `DATABASE_URL`: PostgreSQL connection
+- `PORT`: default `4000`
+- `API_PREFIX`: default `api/v1`
+- `FRONTEND_URL`: CORS origins (comma-separated)
+- `JWT_SECRET`: required by app bootstrap
+- `REQUIRE_JWT_VERIFY`:
+  - `true`: verify JWT signature
+  - `false`: decode claims without signature verification (dev/interoperability mode)
+
+---
+
+## Ngrok usage
 
 ```bash
 cd backend
 npm run ngrok
 ```
 
-Ngrok exposes **the same origin** for both:
-- REST: `https://<subdomain>.ngrok-free.dev/api/v1/...`
-- Socket.IO: `https://<subdomain>.ngrok-free.dev/socket.io/...`
+This exposes backend routes and Swagger through one public URL, for example:
+- `https://<subdomain>.ngrok-free.dev/api/v1/...`
+- `https://<subdomain>.ngrok-free.dev/api/docs`
 
-### Frontend alignment (important)
+Frontend should point to:
+- `NEXT_PUBLIC_API_BASE_URL=https://<subdomain>.ngrok-free.dev/api/v1`
+- `NEXT_PUBLIC_WS_URL=https://<subdomain>.ngrok-free.dev`
 
-Your frontend should point to the ngrok domain like this:
-- **API base**: `https://<subdomain>.ngrok-free.dev/api/v1`
-- **WS base**: `https://<subdomain>.ngrok-free.dev`
-
-If you use ngrok’s browser warning, ensure the frontend sends:
-- Header: `ngrok-skip-browser-warning: 1` (REST)
-- Query param: `?ngrok-skip-browser-warning=1` (WS)
-
-## Request flow diagrams
-
-### 1) Auth + join room + load history
-
-```mermaid
-sequenceDiagram
-  participant FE as Frontend
-  participant AUTH as Auth REST
-  participant WS as Socket.IO Gateway
-  participant SVC as Rooms/Messages Services
-  participant DB as PostgreSQL
-
-  FE->>AUTH: POST /auth/login (email/password)
-  AUTH-->>FE: { token }
-  FE->>WS: connect (auth.token = JWT)
-  FE->>WS: chat:join { roomId }
-  WS->>SVC: requireRegisteredUser + joinRoom(roomId)
-  SVC->>DB: SELECT User + UPSERT RoomMember
-  WS->>SVC: getRecent(roomId)
-  SVC->>DB: SELECT messages (with receipts + attachments)
-  WS-->>FE: chat:recent { roomId, messages[] }
-  WS-->>FE: presence:update { userIds[] }
-```
-
-### 2) Send message (text + attachments)
-
-```mermaid
-sequenceDiagram
-  participant FE as Frontend
-  participant API as REST Upload API
-  participant WS as Socket.IO Gateway
-  participant SVC as Uploads/Messages Services
-  participant DB as PostgreSQL
-
-  alt has files
-    FE->>API: POST /chat/rooms/:roomId/uploads (multipart)
-    API->>SVC: createPendingAttachment(roomId, uploaderId)
-    SVC->>DB: INSERT Attachment (messageId = null)
-    API-->>FE: { attachment.id, url, ... }
-  end
-
-  FE->>WS: chat:send { roomId, body, attachmentIds[] }
-  WS->>SVC: createMessage(...)
-  SVC->>DB: INSERT Message + receipts
-  SVC->>DB: UPDATE Attachment SET messageId = newMessageId
-  WS-->>FE: chat:message (saved message w/ attachments)
-```
-
-### 3) Receipts (delivered/read) + unread count
-
-```mermaid
-sequenceDiagram
-  participant FE as Frontend
-  participant WS as Socket.IO Gateway
-  participant SVC as Messages/Rooms Services
-  participant DB as PostgreSQL
-
-  FE->>WS: chat:ack:delivered { roomId, messageId }
-  WS->>SVC: markDelivered(...)
-  SVC->>DB: UPSERT MessageReceipt(DELIVERED)
-  WS-->>FE: chat:message:delivered { messageId, userId }
-
-  FE->>WS: chat:ack:read { roomId, messageId }
-  WS->>SVC: markRead(...)
-  SVC->>DB: UPSERT MessageReceipt(READ)
-  SVC->>DB: UPDATE RoomMember.lastReadAt/lastReadMessageId
-  WS-->>FE: chat:message:read { messageId, userId }
-```
-
-## REST endpoints (frontend-ready)
-
-Base prefix: `/api/v1`
-
-- **Auth**
-  - `POST /auth/register` → `{ ok, token, user }`
-  - `POST /auth/login` → `{ ok, token, user }`
-- **Rooms**
-  - `GET /chat/rooms` → list rooms (includes members + `unreadCount`)
-  - `GET /chat/rooms/:roomId` → single room + members + unreadCount
-  - `POST /chat/rooms/:roomId/join` → join room (idempotent)
-  - `POST /chat/rooms` → create group room
-  - `POST /chat/dm` → create/get direct room
-- **Messages**
-  - `GET /chat/rooms/:roomId/messages?limit=50&before=<messageId>` → older history
-  - `GET /chat/rooms/:roomId/messages?limit=50&after=<messageId>` → forward history
-  - `POST /chat/rooms/:roomId/messages` → send message via REST (also broadcasts)
-  - `POST /chat/rooms/:roomId/typing` → HTTP mirror of typing
-  - `POST /chat/rooms/:roomId/receipts/delivered` → HTTP mirror of delivered
-  - `POST /chat/rooms/:roomId/receipts/read` → HTTP mirror of read
-  - `POST /chat/rooms/:roomId/read` → mark read (optional `upToMessageId`)
-- **Uploads**
-  - `POST /chat/rooms/:roomId/uploads` (multipart) → returns `attachment`
-  - `GET /uploads/...` (dev static hosting)
-
-## Socket.IO events (frontend-ready)
-
-Client → server:
-- `chat:join` `{ roomId }`
-- `chat:leave` `{ roomId }`
-- `chat:send` `{ roomId, body?, replyToId?, attachmentIds?, clientId? }`
-- `chat:typing` `{ roomId, isTyping }`
-- `chat:ack:delivered` `{ roomId, messageId }`
-- `chat:ack:read` `{ roomId, messageId }`
-
-Server → client:
-- `chat:recent` `{ roomId, messages[] }`
-- `chat:message` `message`
-- `chat:typing` `{ roomId, userIds[] }`
-- `presence:update` `{ userIds[] }`
-- `chat:message:delivered` `{ roomId, messageId, userId }`
-- `chat:message:read` `{ roomId, messageId, userId }`
-
-## Swagger
-
-- Local: `http://localhost:4000/api/docs`
-- Ngrok: `https://<subdomain>.ngrok-free.dev/api/docs`
-- JSON: `http://localhost:4000/api/docs-json`
-
-## Notes (dev vs production)
-
-- `uploads/` is served as static files for **development**.
-  - For production, swap to S3/R2 storage and signed URLs.
-- Don’t commit `.env` (this repo ignores it).
-- **Production**: always set `JWT_SECRET` and keep `REQUIRE_JWT_VERIFY=true`.
-- **Ngrok warning page**: for API calls, use `ngrok-skip-browser-warning: 1` header (or query param) to avoid HTML interstitials.
-
-## Data safety / never lose registered users
-
-- The backend **does not delete data** on its own. Data is only removed if you run destructive commands (like `prisma migrate reset`) or tests that intentionally clean the database.
-- The e2e test suite **creates and deletes** chat/auth data to keep tests isolated.
-  - It is now **guarded**: it refuses to run unless `E2E_CAN_DELETE_DATA=true`.
-
-## Keep backend + ngrok running (dev keep-alive)
-
-If you want a “always running” dev loop that restarts backend/ngrok automatically if either stops:
-
-```powershell
-cd backend
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keepalive-dev-ngrok.ps1
-```

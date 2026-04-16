@@ -102,6 +102,21 @@ describe('Chat API (e2e)', () => {
       .set('Authorization', `Bearer ${a.token}`)
       .expect(200);
 
+    // list users directory (exclude self)
+    await request(app.getHttpServer())
+      .get('/api/v1/chat/users')
+      .set('Authorization', `Bearer ${a.token}`)
+      .expect(200)
+      .expect((res) => {
+        expect(Array.isArray(res.body?.users)).toBe(true);
+        expect(
+          res.body.users.some((u: { id: string }) => u.id === b.userId),
+        ).toBe(true);
+        expect(
+          res.body.users.some((u: { id: string }) => u.id === a.userId),
+        ).toBe(false);
+      });
+
     // create room
     const roomRes = await request(app.getHttpServer())
       .post('/api/v1/chat/rooms')
@@ -109,13 +124,17 @@ describe('Chat API (e2e)', () => {
       .send({ name: 'Test Room' })
       .expect(201);
     expect(roomRes.body?.ok).toBe(true);
+    expect(roomRes.body?.room?.name).toBe('Test Room');
     const roomId = roomRes.body.room.id as string;
 
     // get room
     await request(app.getHttpServer())
       .get(`/api/v1/chat/rooms/${roomId}`)
       .set('Authorization', `Bearer ${a.token}`)
-      .expect(200);
+      .expect(200)
+      .expect((res) => {
+        expect(res.body?.room?.name).toBe('Test Room');
+      });
 
     // join room (idempotent)
     await request(app.getHttpServer())
@@ -123,6 +142,15 @@ describe('Chat API (e2e)', () => {
       .set('Authorization', `Bearer ${a.token}`)
       .send({})
       .expect(200);
+
+    // name should remain stable after join operations
+    await request(app.getHttpServer())
+      .get(`/api/v1/chat/rooms/${roomId}`)
+      .set('Authorization', `Bearer ${a.token}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body?.room?.name).toBe('Test Room');
+      });
 
     // dm create/get
     const dmRes = await request(app.getHttpServer())

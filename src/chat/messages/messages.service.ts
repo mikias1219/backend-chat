@@ -54,6 +54,9 @@ export class MessagesService {
           'replyToId must reference a message in the same room',
         );
       }
+      if (parent.userId === params.userId) {
+        throw new BadRequestException('You cannot reply to your own message');
+      }
     }
 
     const created = await this.prisma.$transaction(async (tx) => {

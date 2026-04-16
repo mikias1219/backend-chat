@@ -35,7 +35,13 @@ export class ChatCoordinatorService {
     roomId: string;
     identity: ChatUserIdentity;
   }): Promise<{ userIds: string[]; recent: MessageOut[] }> {
-    const user = await this.rooms.requireRegisteredUser(params.identity.userId);
+    const user = await this.rooms.requireRegisteredUser(
+      params.identity.userId,
+      {
+        name: params.identity.name,
+        email: params.identity.email ?? null,
+      },
+    );
     await this.rooms.joinRoom({ roomId: params.roomId, userId: user.id });
     await params.socket.join(params.roomId);
 
@@ -76,7 +82,13 @@ export class ChatCoordinatorService {
     this.assertHasContent(params.body, params.attachmentIds);
     await this.rooms.requireMember(params.roomId, params.identity.userId);
 
-    const user = await this.rooms.requireRegisteredUser(params.identity.userId);
+    const user = await this.rooms.requireRegisteredUser(
+      params.identity.userId,
+      {
+        name: params.identity.name,
+        email: params.identity.email ?? null,
+      },
+    );
 
     const saved = await this.messages.createMessage({
       roomId: params.roomId,

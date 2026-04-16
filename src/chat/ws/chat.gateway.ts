@@ -8,6 +8,7 @@ import {
   WebSocketServer,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
+import { identityFromBearer } from '../../auth/jwt-lite';
 import { ChatCoordinatorService } from '../chat-coordinator.service';
 import { JoinRoomDto } from '../dto/join-room.dto';
 import { SendMessageDto } from '../dto/send-message.dto';
@@ -66,23 +67,6 @@ export class ChatGateway implements OnGatewayInit {
     return (process.env.SOCKET_ALLOW_ANON ?? 'false').toLowerCase() === 'true';
   }
 
-  private decodeJwt(token: string): Record<string, unknown> | null {
-    const parts = token.split('.');
-    if (parts.length < 2) return null;
-    const payload = parts[1];
-    const padded = payload.padEnd(
-      payload.length + ((4 - (payload.length % 4)) % 4),
-      '=',
-    );
-    const b64 = padded.replace(/-/g, '+').replace(/_/g, '/');
-    try {
-      const json = Buffer.from(b64, 'base64').toString('utf8');
-      return JSON.parse(json) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-  }
-
   private getMeta(socket: Socket): ClientMeta {
     const raw = socket.data?.meta;
     return (raw ?? {}) as ClientMeta;
@@ -92,25 +76,20 @@ export class ChatGateway implements OnGatewayInit {
     socket.data.meta = meta;
   }
 
-  private ensureIdentity(socket: Socket) {
+  private async ensureIdentity(socket: Socket) {
     const meta = this.getMeta(socket);
     if (meta.userId) return;
 
     const token = socket.handshake.auth?.token;
     if (typeof token === 'string' && token.length > 0) {
-      const claims = this.decodeJwt(token);
-      const userId =
-        (claims?.sub as string | undefined) ??
-        (claims?.userId as string | undefined) ??
-        (claims?.id as string | undefined);
-      const userName =
-        (claims?.name as string | undefined) ??
-        (claims?.userName as string | undefined);
-      const email = (claims?.email as string | undefined) ?? undefined;
+      const identity = await identityFromBearer(`Bearer ${token}`);
+      const userId = identity?.userId;
+      const userName = identity?.name;
+      const email = identity?.email;
 
       this.setMeta(socket, {
         ...meta,
-        userId: userId,
+        userId,
         userName,
         email,
       });
@@ -136,7 +115,7 @@ export class ChatGateway implements OnGatewayInit {
     if (!body?.roomId) return { ok: false, error: 'roomId is required' };
 
     try {
-      this.ensureIdentity(socket);
+      await this.ensureIdentity(socket);
     } catch (e) {
       if (e instanceof HttpException) return { ok: false, error: e.message };
       return { ok: false, error: 'unauthorized' };
@@ -181,7 +160,7 @@ export class ChatGateway implements OnGatewayInit {
     }
 
     try {
-      this.ensureIdentity(socket);
+      await this.ensureIdentity(socket);
     } catch (e) {
       if (e instanceof HttpException) return { ok: false, error: e.message };
       return { ok: false, error: 'unauthorized' };
@@ -218,7 +197,7 @@ export class ChatGateway implements OnGatewayInit {
   ) {
     if (!body?.roomId) return { ok: false, error: 'roomId is required' };
     try {
-      this.ensureIdentity(socket);
+      await this.ensureIdentity(socket);
     } catch (e) {
       if (e instanceof HttpException) return { ok: false, error: e.message };
       return { ok: false, error: 'unauthorized' };
@@ -249,7 +228,7 @@ export class ChatGateway implements OnGatewayInit {
     if (!body?.roomId || !body?.messageId)
       return { ok: false, error: 'roomId and messageId are required' };
     try {
-      this.ensureIdentity(socket);
+      await this.ensureIdentity(socket);
     } catch (e) {
       if (e instanceof HttpException) return { ok: false, error: e.message };
       return { ok: false, error: 'unauthorized' };
@@ -273,7 +252,7 @@ export class ChatGateway implements OnGatewayInit {
     if (!body?.roomId || !body?.messageId)
       return { ok: false, error: 'roomId and messageId are required' };
     try {
-      this.ensureIdentity(socket);
+      await this.ensureIdentity(socket);
     } catch (e) {
       if (e instanceof HttpException) return { ok: false, error: e.message };
       return { ok: false, error: 'unauthorized' };
